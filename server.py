@@ -1,6 +1,12 @@
 import socket
 import threading
 import logging # Using standard logging module for better output control
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import dh
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -27,6 +33,23 @@ def recv_all(conn, max_size=MAX_PACKET_SIZE):
         logging.error(f"Error receiving data: {e}")
         return None
 
+#decryption function
+#gus
+def decrypt_message(aes_key, data: bytes):
+    aesgcm = AESGCM(aes_key)
+    nonce = data[:12]
+    ciphertext = data[12:]
+    plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+    return plaintext
+
+#encryption with the shared key
+#Gus
+def encrypt_message(aes_key, plaintext: bytes):
+    aesgcm = AESGCM(aes_key)
+    nonce = os.urandom(12)   # AES-GCM requires a **12-byte nonce**
+    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+    return nonce + ciphertext
+
 # --- Main Client Handler ---
 def handle_client(conn, addr):
     logging.info(f"[CONNECTION] Client connected: {addr[0]}:{addr[1]}")
@@ -36,8 +59,38 @@ def handle_client(conn, addr):
         logging.info(f"[{addr[1]}] Starting KEY EXCHANGE...")
         conn.sendall(b"KEY_EXCHANGE_START")
         # --- Part 2: Key exchange logic will go here ---
-        shared_key = None # Placeholder for the negotiated session key
+        #make our parameters, and both keys
+        parameters = dh.generate_parameters(generator=2, key_size=2048)
+        private_key = parameters.generate_private_key()
+        public_key = private_key.public_key()
+        logging.info(f"Keys made sending to client the parameters")
+        #send the client the parameters
+        param_bytes = parameters.parameter_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.ParameterFormat.PKCS3
+        )
+        conn.sendall(param_bytes)
+        #grab the clients public key and send our public
+        cli_pub_key = recv_all(conn)
+        logging.info(f"received from client")
+        client_public_key = serialization.load_pem_public_key(cli_pub_key)
+
+        ser_pub_key = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        conn.sendall(ser_pub_key)
+        logging.info(f"sending to the client")
+
+        shared_key = private_key.exchange(client_public_key)
+
         logging.info(f"[{addr[1]}] KEY EXCHANGE Complete. Shared Key: {shared_key if shared_key else 'PENDING'}")
+        aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,             # 32 bytes = AES-256 key
+            salt=None,
+            info=b'handshake data'
+        ).derive(shared_key)
     except Exception as e:
         logging.error(f"[{addr[1]}] Key Exchange Failed: {e}")
         conn.close()
@@ -54,13 +107,17 @@ def handle_client(conn, addr):
             # 2. Logging Encrypted Packet Arrival
             logging.info(f"[{addr[1]}] PACKET ARRIVED - Size: {len(encrypted_data_with_iv)} bytes. Encrypted Data: {encrypted_data_with_iv[:20]!r}...")
 
-            # --- Part 2 Placeholder: Decryption and Decapsulation ---
-            decrypted_message = f"*** DECRYPTED MESSAGE PENDING (Size: {len(encrypted_data_with_iv)}) ***"
-            logging.warning(f"[{addr[1]}] DECRYPTED: {decrypted_message}")
+            
+
+            
+            plaintext_bytes = decrypt_message(aes_key, encrypted_data_with_iv)
+            decrypted_message = plaintext_bytes.decode("utf-8")
+
+            logging.info(f"[{addr[1]}] DECRYPTED: {decrypted_message}")
             
             # 3. Send Acknowledgment
             ack_message = f"ACK: Received & processed packet. ({len(encrypted_data_with_iv)} bytes)"
-            conn.sendall(ack_message.encode('utf-8'))
+            conn.sendall(encrypt_message(aes_key, ack_message.encode('utf-8')))
             
         except ConnectionResetError:
             break
