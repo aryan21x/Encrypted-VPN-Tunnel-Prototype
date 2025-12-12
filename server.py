@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import os
+from ip_simulator import decapsulate_ip_header
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -108,15 +109,19 @@ def handle_client(conn, addr):
             logging.info(f"[{addr[1]}] PACKET ARRIVED - Size: {len(encrypted_data_with_iv)} bytes. Encrypted Data: {encrypted_data_with_iv[:20]!r}...")
 
             
-
-            
+            # --- Placeholder: Decryption and Decapsulation ---
             plaintext_bytes = decrypt_message(aes_key, encrypted_data_with_iv)
-            decrypted_message = plaintext_bytes.decode("utf-8")
-
-            logging.info(f"[{addr[1]}] DECRYPTED: {decrypted_message}")
             
-            # 3. Send Acknowledgment
-            ack_message = f"ACK: Received & processed packet. ({len(encrypted_data_with_iv)} bytes)"
+            # **[2] NEW STEP: Strip the simulated IP Header**
+            simulated_header, original_payload = decapsulate_ip_header(plaintext_bytes)
+            
+            decrypted_message = original_payload.decode("utf-8")
+
+            # Update logging to show the decrypted message AND the simulated header
+            logging.info(f"[{addr[1]}] DECRYPTED. Sim. Header: {simulated_header.decode('utf-8')} -> Payload: {decrypted_message}")
+            
+            # 3. Send Acknowledgment (The ACK is now encrypted)
+            ack_message = f"ACK: Received packet with header {simulated_header.decode('utf-8')}."
             conn.sendall(encrypt_message(aes_key, ack_message.encode('utf-8')))
             
         except ConnectionResetError:

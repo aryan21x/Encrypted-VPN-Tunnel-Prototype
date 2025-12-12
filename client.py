@@ -6,6 +6,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import os
 import logging
+from ip_simulator import encapsulate_with_ip
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -102,16 +103,17 @@ def run_client():
                 continue
 
             # --- Part 2 Placeholder: ENCRYPTION and Encapsulation ---
-            # Data must be encrypted and encapsulated into a tunnel packet format here
-            # e.g., encrypted_packet = encrypt_data(message, shared_key)
             plaintext_bytes = message.encode('utf-8')
 
-            # Encrypt the message properly
-            encrypted_packet = encrypt_message(aes_key, plaintext_bytes)
+            # **[1] NEW STEP: Simulate IP Encapsulation**
+            plaintext_with_ip = encapsulate_with_ip(plaintext_bytes)
+            
+            # Encrypt the full message (IP Header + Payload)
+            encrypted_packet = encrypt_message(aes_key, plaintext_with_ip)
             
             # 1. Logging Sent Packet
-            logging.info(f"PACKET SENT - Original Data: '{message}' - Size: {len(encrypted_packet)} bytes.")
-            
+            # The client now logs that it is sending a packet with an IP header
+            logging.info(f"PACKET SENT - Original Data: '{message}' - Encapsulated Size: {len(encrypted_packet)} bytes.")
             # 2. Data Transmission (Sending the encapsulated packet)
             s.sendall(encrypted_packet)
             
