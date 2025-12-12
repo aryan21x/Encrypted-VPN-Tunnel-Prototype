@@ -16,12 +16,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import os
 
 # Assuming ip_simulator.py is in the same directory
-from ip_simulator import encapsulate_with_ip, SIM_SRC_IP, SIM_DST_IP
+from ip_simulator import encapsulate_with_ip, SIM_SRC_IP, SIM_DST_IP, HOST
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Constants ---
-HOST = '127.0.0.1'
 PORT = 65432
 MAX_PACKET_SIZE = 4096
 

@@ -13,11 +13,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import os
 
 # Assuming ip_simulator.py is in the same directory, we only need the custom functions
-from ip_simulator import decapsulate_ip_header
+from ip_simulator import decapsulate_ip_header, HOST
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-HOST = '127.0.0.1'
 PORT = 65432
 MAX_PACKET_SIZE = 4096
 
