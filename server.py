@@ -1,133 +1,159 @@
+# server.py (Complete)
+
 import socket
 import threading
-import logging # Using standard logging module for better output control
+import logging
+import signal
+import sys
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import os
+
+# Assuming ip_simulator.py is in the same directory, we only need the custom functions
 from ip_simulator import decapsulate_ip_header
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 HOST = '127.0.0.1'
 PORT = 65432
-MAX_PACKET_SIZE = 4096 # Maximum size for a single encrypted packet
+MAX_PACKET_SIZE = 4096
 
-# --- Helper Function for Reliable Data Reception (Buffer Management) ---
+# Global flag for graceful shutdown
+SERVER_RUNNING = True
+SERVER_SOCKET = None
+
+# --- Utility Functions ---
 
 def recv_all(conn, max_size=MAX_PACKET_SIZE):
-    """
-    Receives all data from the socket up to the MAX_PACKET_SIZE.
-    In a real-world scenario, a header indicating the packet length would be used.
-    """
+    """Receives all data from the socket up to the MAX_PACKET_SIZE."""
     data = b''
     try:
-        # For simplicity, we'll read up to the maximum size here.
-        # Once encapsulation is implemented (Part 2), we'll read the header first,
-        # then read exactly the number of bytes specified in the header.
         chunk = conn.recv(max_size)
         data += chunk
         return data
     except Exception as e:
-        logging.error(f"Error receiving data: {e}")
+        # Handle exceptions gracefully during receive
         return None
 
-#decryption function
-#gus
 def decrypt_message(aes_key, data: bytes):
+    """Decrypts data (Nonce + Ciphertext) using the AES-GCM key."""
     aesgcm = AESGCM(aes_key)
     nonce = data[:12]
     ciphertext = data[12:]
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
     return plaintext
 
-#encryption with the shared key
-#Gus
 def encrypt_message(aes_key, plaintext: bytes):
+    """Encrypts plaintext and prepends the 12-byte Nonce for encapsulation."""
     aesgcm = AESGCM(aes_key)
-    nonce = os.urandom(12)   # AES-GCM requires a **12-byte nonce**
+    nonce = os.urandom(12)
     ciphertext = aesgcm.encrypt(nonce, plaintext, None)
     return nonce + ciphertext
 
+# --- Graceful Shutdown Handler ---
+def signal_handler(sig, frame):
+    """Handles Ctrl+C signal for clean server shutdown."""
+    global SERVER_RUNNING
+    logging.warning("\n[SHUTDOWN] Ctrl+C received. Shutting down server gracefully...")
+    SERVER_RUNNING = False
+    if SERVER_SOCKET:
+        SERVER_SOCKET.close() # Close the listening socket
+    sys.exit(0)
+
+# Register the signal handler
+signal.signal(signal.SIGINT, signal_handler)
+
 # --- Main Client Handler ---
 def handle_client(conn, addr):
+    global SERVER_RUNNING
     logging.info(f"[CONNECTION] Client connected: {addr[0]}:{addr[1]}")
+    aes_key = None
     
-    # --- Part 2 Placeholder: Diffie-Hellman Key Exchange ---
     try:
-        logging.info(f"[{addr[1]}] Starting KEY EXCHANGE...")
+        # --- DH Key Exchange --- 
+        logging.info(f"[{addr[1]}] Starting KEY EXCHANGE (DH)...")
         conn.sendall(b"KEY_EXCHANGE_START")
-        # --- Part 2: Key exchange logic will go here ---
-        #make our parameters, and both keys
+        
+        # 1. Generate DH Parameters on Server
         parameters = dh.generate_parameters(generator=2, key_size=2048)
         private_key = parameters.generate_private_key()
         public_key = private_key.public_key()
-        logging.info(f"Keys made sending to client the parameters")
-        #send the client the parameters
+        
+        logging.info(f"[{addr[1]}] DH Keys generated. Sending parameters to client...")
+        
+        # 2. Send DH Parameters to Client
         param_bytes = parameters.parameter_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.ParameterFormat.PKCS3
         )
         conn.sendall(param_bytes)
-        #grab the clients public key and send our public
+        
+        # 3. Receive Client Public Key
         cli_pub_key = recv_all(conn)
-        logging.info(f"received from client")
+        logging.info(f"[{addr[1]}] Received client public key")
         client_public_key = serialization.load_pem_public_key(cli_pub_key)
-
+        
+        # 4. Send Server Public Key
         ser_pub_key = public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
         conn.sendall(ser_pub_key)
-        logging.info(f"sending to the client")
-
+        logging.info(f"[{addr[1]}] Sent server public key")
+        
+        # 5. Calculate Shared Key and Derive AES Key
         shared_key = private_key.exchange(client_public_key)
 
-        logging.info(f"[{addr[1]}] KEY EXCHANGE Complete. Shared Key: {shared_key if shared_key else 'PENDING'}")
         aes_key = HKDF(
             algorithm=hashes.SHA256(),
-            length=32,             # 32 bytes = AES-256 key
+            length=32, # 32 bytes = AES-256 key
             salt=None,
             info=b'handshake data'
         ).derive(shared_key)
+        
+        logging.info(f"[{addr[1]}] KEY EXCHANGE Complete. AES Key Derived.")
+        
     except Exception as e:
         logging.error(f"[{addr[1]}] Key Exchange Failed: {e}")
         conn.close()
         return
 
-    while True:
+    # --- Main Data Tunnel Loop ---
+    while SERVER_RUNNING:
         try:
-            # 1. Data Reception (Improved Buffer Management)
+            # 1. Data Reception (Encrypted)
             encrypted_data_with_iv = recv_all(conn)
             
             if not encrypted_data_with_iv:
                 break # Connection closed or error
 
-            # 2. Logging Encrypted Packet Arrival
-            logging.info(f"[{addr[1]}] PACKET ARRIVED - Size: {len(encrypted_data_with_iv)} bytes. Encrypted Data: {encrypted_data_with_iv[:20]!r}...")
+            logging.info(
+                f"[{addr[1]}] PACKET ARRIVED - Size: {len(encrypted_data_with_iv)} bytes | Preview: {encrypted_data_with_iv[:20]!r}"
+            )
 
-            
-            # --- Placeholder: Decryption and Decapsulation ---
+            # 2. Decryption and Decapsulation
             plaintext_bytes = decrypt_message(aes_key, encrypted_data_with_iv)
             
-            # **[2] NEW STEP: Strip the simulated IP Header**
+            # Simulated IP Decapsulation
             simulated_header, original_payload = decapsulate_ip_header(plaintext_bytes)
-            
             decrypted_message = original_payload.decode("utf-8")
-
-            # Update logging to show the decrypted message AND the simulated header
-            logging.info(f"[{addr[1]}] DECRYPTED. Sim. Header: {simulated_header.decode('utf-8')} -> Payload: {decrypted_message}")
             
-            # 3. Send Acknowledgment (The ACK is now encrypted)
-            ack_message = f"ACK: Received packet with header {simulated_header.decode('utf-8')}."
+            logging.info(f"[{addr[1]}] DECRYPTED: Header={simulated_header.decode('utf-8')} -> Payload='{decrypted_message}'")
+            
+            # 3. Send Encrypted Acknowledgment (ACK)
+            header_str = simulated_header.decode('utf-8')
+            src_ip = header_str.split(':')[0]
+            ack_message = f"ACK: Received payload '{decrypted_message[:15]}' from {src_ip}."
             conn.sendall(encrypt_message(aes_key, ack_message.encode('utf-8')))
             
         except ConnectionResetError:
             break
         except Exception as e:
-            logging.error(f"[{addr[1]}] Unexpected error in client loop: {e}")
+            if SERVER_RUNNING: # Only log if not shutting down
+                logging.error(f"[{addr[1]}] Unexpected error in client loop: {e}")
             break
             
     logging.info(f"[DISCONNECT] Client disconnected: {addr[0]}:{addr[1]}")
@@ -135,30 +161,36 @@ def handle_client(conn, addr):
 
 # --- Server Startup ---
 def run_server():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Good practice for quick restarts
-    
+    global SERVER_SOCKET, SERVER_RUNNING
     try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.settimeout(1.0) # Set timeout for graceful shutdown check
         s.bind((HOST, PORT))
         s.listen()
+        SERVER_SOCKET = s
+        
         logging.info(f"--- VPN SERVER INITIATED ---")
         logging.info(f"Server listening on {HOST}:{PORT}")
         
-        while True:
-            conn, addr = s.accept()
+        while SERVER_RUNNING:
+            try:
+                conn, addr = s.accept()
+                client_thread = threading.Thread(target=handle_client, args=(conn, addr))
+                client_thread.start()
+                
+                logging.info(f"New client connected. Active connections: {threading.active_count() - 1}")
+            except socket.timeout:
+                continue # Check the SERVER_RUNNING flag
             
-            # Start a new thread for the connected client (Efficient concurrent handling)
-            client_thread = threading.Thread(target=handle_client, args=(conn, addr))
-            client_thread.start()
+    except OSError as e:
+        if SERVER_RUNNING: # Don't log error if it's the expected shutdown close()
+            logging.critical(f"Server Fatal Error: {e}")
             
-            logging.info(f"New client connected. Active connections: {threading.active_count() - 1}")
-            
-    except Exception as e:
-        logging.critical(f"Server Fatal Error: {e}")
-        
     finally:
-        logging.info("Server shutting down.")
-        s.close()
+        if SERVER_SOCKET:
+             SERVER_SOCKET.close()
+        logging.info("Server shut down complete.")
 
 if __name__ == "__main__":
     run_server()
